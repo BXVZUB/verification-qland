@@ -12,7 +12,6 @@ function setDiscordClient(client) {
 
 const REDIRECT_URI = `${config.BASE_URL}/callback`;
 
-// Donner le rôle vérifié sur tous les serveurs
 async function giveVerifiedRole(userId) {
   for (const guildId of config.GUILD_IDS) {
     try {
@@ -40,7 +39,6 @@ async function giveVerifiedRole(userId) {
   }
 }
 
-// Redirige vers OAuth2 Discord
 app.get('/', (req, res) => {
   const url = `https://discord.com/oauth2/authorize`
     + `?client_id=${config.CLIENT_ID}`
@@ -50,13 +48,11 @@ app.get('/', (req, res) => {
   res.redirect(url);
 });
 
-// Callback OAuth2
 app.get('/callback', async (req, res) => {
   const { code } = req.query;
   if (!code) return res.status(400).send('Code manquant.');
 
   try {
-    // Échange code → token
     const tokenRes = await axios.post('https://discord.com/api/oauth2/token',
       new URLSearchParams({
         client_id:     config.CLIENT_ID,
@@ -70,7 +66,6 @@ app.get('/callback', async (req, res) => {
 
     const { access_token, refresh_token, expires_in } = tokenRes.data;
 
-    // Infos utilisateur
     const userRes = await axios.get('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${access_token}` }
     });
@@ -78,12 +73,12 @@ app.get('/callback', async (req, res) => {
     const { id, username, discriminator } = userRes.data;
     const tag = discriminator === '0' ? username : `${username}#${discriminator}`;
 
-    // Sauvegarde token
     await db.saveToken(id, tag, access_token, refresh_token, expires_in);
     console.log(`✅ Token sauvegardé : ${tag} (${id})`);
 
-    // Ajouter au serveur sur tous les guilds
+    // Join seulement sur GUILD_ID_1, pas sur GUILD_ID_2
     for (const guildId of config.GUILD_IDS) {
+      if (guildId === config.GUILD_IDS[1]) continue;
       try {
         await axios.put(
           `https://discord.com/api/guilds/${guildId}/members/${id}`,
@@ -95,7 +90,7 @@ app.get('/callback', async (req, res) => {
       }
     }
 
-    // Donner le rôle sur tous les guilds
+    // Rôle sur tous les serveurs (si le membre est déjà dedans)
     if (discordClient) await giveVerifiedRole(id);
 
     res.send(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Vérification réussie</title>
