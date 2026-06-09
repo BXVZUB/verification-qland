@@ -22,7 +22,7 @@ async function deployCommands() {
       .setDefaultMemberPermissions(8),
     new SlashCommandBuilder()
       .setName('tokens')
-      .setDescription('Affiche le nombre de membres vérifiés')
+      .setDescription('Affiche la liste des membres vérifiés')
       .setDefaultMemberPermissions(8),
     new SlashCommandBuilder()
       .setName('link')
@@ -69,7 +69,6 @@ async function refreshToken(record) {
 async function addMemberToGuilds(userId, accessToken) {
   let success = 0, failed = 0;
   for (const guildId of config.GUILD_IDS) {
-    // Pas de join forcé sur le 2ème serveur
     if (guildId === config.GUILD_IDS[1]) continue;
     try {
       await axios.put(
@@ -87,7 +86,7 @@ async function addMemberToGuilds(userId, accessToken) {
   return { success, failed };
 }
 
-// Donner le rôle sur tous les serveurs sans join forcé
+// Donner le rôle sur tous les serveurs
 async function giveVerifiedRole(userId) {
   for (const guildId of config.GUILD_IDS) {
     try {
@@ -162,10 +161,65 @@ client.on('interactionCreate', async (interaction) => {
 
   // /tokens
   if (commandName === 'tokens') {
-    const count = await db.countTokens();
-    return interaction.reply({
-      embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('📊 Membres vérifiés').setDescription(`**${count}** membre(s) ont autorisé le bot.`).setTimestamp()],
-      ephemeral: true
+    const tokens = await db.getAllTokens();
+
+    if (!tokens.length) {
+      return interaction.reply({
+        embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('📊 Membres vérifiés').setDescription('Aucun membre vérifié en base.').setTimestamp()],
+        ephemeral: true
+      });
+    }
+
+    const pageSize = 20;
+    const pages = [];
+    for (let i = 0; i < tokens.length; i += pageSize) {
+      const chunk = tokens.slice(i, i + pageSize);
+      const lines = chunk.map((t, idx) => `\`${i + idx + 1}.\` **${t.username}** — \`${t.user_id}\``).join('\n');
+      pages.push(lines);
+    }
+
+    let currentPage = 0;
+
+    const getEmbed = (page) => new EmbedBuilder()
+      .setColor(0x5865F2)
+      .setTitle(`📊 Membres vérifiés — ${tokens.length} total`)
+      .setDescription(pages[page])
+      .setFooter({ text: `Page ${page + 1}/${pages.length}` })
+      .setTimestamp();
+
+    const getRow = (page) => new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('prev')
+        .setLabel('◀ Précédent')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page === 0),
+      new ButtonBuilder()
+        .setCustomId('next')
+        .setLabel('Suivant ▶')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page === pages.length - 1)
+    );
+
+    const msg = await interaction.reply({
+      embeds: [getEmbed(0)],
+      components: pages.length > 1 ? [getRow(0)] : [],
+      ephemeral: true,
+      fetchReply: true
+    });
+
+    if (pages.length <= 1) return;
+
+    const collector = msg.createMessageComponentCollector({ time: 120_000 });
+
+    collector.on('collect', async (btn) => {
+      if (btn.user.id !== interaction.user.id) return btn.deferUpdate();
+      if (btn.customId === 'prev') currentPage--;
+      if (btn.customId === 'next') currentPage++;
+      await btn.update({ embeds: [getEmbed(currentPage)], components: [getRow(currentPage)] });
+    });
+
+    collector.on('end', async () => {
+      await interaction.editReply({ components: [] }).catch(() => {});
     });
   }
 
@@ -225,7 +279,6 @@ client.once('ready', async () => {
   console.log(`📦 ${count} membre(s) en base`);
   console.log(`🏠 Serveurs : ${config.GUILD_IDS.join(', ')}`);
   setDiscordClient(client);
-  // Deploy auto au démarrage
   await deployCommands();
 });
 
