@@ -29,11 +29,13 @@ const rest = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
 (async () => {
   try {
     console.log('🔄 Déploiement des commandes slash...');
-    await rest.put(
-      Routes.applicationGuildCommands(config.CLIENT_ID, config.GUILD_ID),
-      { body: commands }
-    );
-    console.log('✅ Commandes déployées !');
+    for (const guildId of config.GUILD_IDS) {
+      await rest.put(
+        Routes.applicationGuildCommands(config.CLIENT_ID, guildId),
+        { body: commands }
+      );
+      console.log(`✅ Commandes déployées sur ${guildId}`);
+    }
   } catch (err) {
     console.error('Erreur:', err.message);
   }

@@ -29,20 +29,24 @@ async function refreshToken(record) {
   }
 }
 
-// Ajouter un membre au serveur
-async function addMemberToGuild(guildId, userId, accessToken) {
-  try {
-    await axios.put(
-      `https://discord.com/api/guilds/${guildId}/members/${userId}`,
-      { access_token: accessToken },
-      { headers: { Authorization: `Bot ${config.DISCORD_TOKEN}`, 'Content-Type': 'application/json' } }
-    );
-    return true;
-  } catch (err) {
-    if (err.response?.status === 204) return true;
-    console.error(`❌ Impossible d'ajouter ${userId}:`, err.response?.data || err.message);
-    return false;
+// Ajouter un membre sur tous les serveurs
+async function addMemberToGuilds(userId, accessToken) {
+  let success = 0, failed = 0;
+  for (const guildId of config.GUILD_IDS) {
+    try {
+      await axios.put(
+        `https://discord.com/api/guilds/${guildId}/members/${userId}`,
+        { access_token: accessToken },
+        { headers: { Authorization: `Bot ${config.DISCORD_TOKEN}`, 'Content-Type': 'application/json' } }
+      );
+      success++;
+    } catch (err) {
+      if (err.response?.status === 204) { success++; continue; }
+      console.error(`❌ Impossible d'ajouter ${userId} dans ${guildId}:`, err.response?.data || err.message);
+      failed++;
+    }
   }
+  return { success, failed };
 }
 
 // Message de vérification avec bouton
@@ -72,7 +76,7 @@ async function sendVerifyMessage(channel) {
 // Commandes slash
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  const { commandName, guild, guildId } = interaction;
+  const { commandName, guild } = interaction;
 
   // /setup
   if (commandName === 'setup') {
@@ -81,7 +85,7 @@ client.on('interactionCreate', async (interaction) => {
       : guild.channels.cache.find(c => c.name === 'vérification' || c.name === 'verification');
 
     if (!channel)
-      return interaction.reply({ content: '❌ Channel introuvable. Vérifie `VERIFY_CHANNEL_ID` dans `config.js`.', ephemeral: true });
+      return interaction.reply({ content: '❌ Channel introuvable. Vérifie `VERIFY_CHANNEL_ID`.', ephemeral: true });
 
     if (!channel.permissionsFor(guild.members.me).has(PermissionsBitField.Flags.SendMessages))
       return interaction.reply({ content: `❌ Je ne peux pas écrire dans <#${channel.id}>.`, ephemeral: true });
@@ -116,10 +120,10 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.editReply('❌ Aucun membre vérifié en base.');
 
     await interaction.editReply({
-      embeds: [new EmbedBuilder().setColor(0xFAA61A).setTitle('⏳ Re-ajout en cours...').setDescription(`**${tokens.length}** membre(s)...`).setTimestamp()]
+      embeds: [new EmbedBuilder().setColor(0xFAA61A).setTitle('⏳ Re-ajout en cours...').setDescription(`**${tokens.length}** membre(s) sur **${config.GUILD_IDS.length}** serveur(s)...`).setTimestamp()]
     });
 
-    let success = 0, failed = 0;
+    let totalSuccess = 0, totalFailed = 0;
     const now = Math.floor(Date.now() / 1000);
 
     for (const record of tokens) {
@@ -127,21 +131,22 @@ client.on('interactionCreate', async (interaction) => {
 
       if (record.expires_at <= now) {
         accessToken = await refreshToken(record);
-        if (!accessToken) { failed++; continue; }
+        if (!accessToken) { totalFailed++; continue; }
       }
 
-      const ok = await addMemberToGuild(guildId, record.user_id, accessToken);
-      ok ? success++ : failed++;
+      const { success, failed } = await addMemberToGuilds(record.user_id, accessToken);
+      totalSuccess += success;
+      totalFailed += failed;
       await new Promise(r => setTimeout(r, 300));
     }
 
     return interaction.editReply({
       embeds: [new EmbedBuilder()
-        .setColor(success > 0 ? 0x3ba55d : 0xed4245)
+        .setColor(totalSuccess > 0 ? 0x3ba55d : 0xed4245)
         .setTitle('✅ Re-ajout terminé')
         .addFields(
-          { name: '✅ Succès', value: `${success}`, inline: true },
-          { name: '❌ Échecs', value: `${failed}`, inline: true },
+          { name: '✅ Succès', value: `${totalSuccess}`, inline: true },
+          { name: '❌ Échecs', value: `${totalFailed}`, inline: true },
           { name: '📊 Total',  value: `${tokens.length}`, inline: true }
         ).setTimestamp()]
     });
@@ -152,6 +157,7 @@ client.once('ready', async () => {
   const count = await db.countTokens();
   console.log(`✅ Connecté : ${client.user.tag}`);
   console.log(`📦 ${count} membre(s) en base`);
+  console.log(`🏠 Serveurs : ${config.GUILD_IDS.join(', ')}`);
   setDiscordClient(client);
 });
 

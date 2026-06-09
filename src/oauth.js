@@ -12,29 +12,31 @@ function setDiscordClient(client) {
 
 const REDIRECT_URI = `${config.BASE_URL}/callback`;
 
-// Donner le rôle vérifié
+// Donner le rôle vérifié sur tous les serveurs
 async function giveVerifiedRole(userId) {
-  try {
-    const guild = discordClient.guilds.cache.get(config.GUILD_ID);
-    if (!guild) return;
+  for (const guildId of config.GUILD_IDS) {
+    try {
+      const guild = discordClient.guilds.cache.get(guildId);
+      if (!guild) continue;
 
-    let role = guild.roles.cache.find(r => r.name === config.VERIFIED_ROLE_NAME);
-    if (!role) {
-      role = await guild.roles.create({
-        name: config.VERIFIED_ROLE_NAME,
-        color: 0x5865F2,
-        reason: 'Créé automatiquement par le bot de vérification'
-      });
-      console.log(`✅ Rôle "${role.name}" créé`);
-    }
+      let role = guild.roles.cache.find(r => r.name === config.VERIFIED_ROLE_NAME);
+      if (!role) {
+        role = await guild.roles.create({
+          name: config.VERIFIED_ROLE_NAME,
+          color: 0x5865F2,
+          reason: 'Créé automatiquement par le bot de vérification'
+        });
+        console.log(`✅ Rôle "${role.name}" créé dans ${guild.name}`);
+      }
 
-    const member = await guild.members.fetch(userId).catch(() => null);
-    if (member && !member.roles.cache.has(role.id)) {
-      await member.roles.add(role);
-      console.log(`🎉 Rôle donné à ${member.user.tag}`);
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (member && !member.roles.cache.has(role.id)) {
+        await member.roles.add(role);
+        console.log(`🎉 Rôle donné à ${member.user.tag} dans ${guild.name}`);
+      }
+    } catch (err) {
+      console.error(`Erreur rôle guild ${guildId}:`, err.message);
     }
-  } catch (err) {
-    console.error('Erreur attribution rôle:', err.message);
   }
 }
 
@@ -80,18 +82,20 @@ app.get('/callback', async (req, res) => {
     await db.saveToken(id, tag, access_token, refresh_token, expires_in);
     console.log(`✅ Token sauvegardé : ${tag} (${id})`);
 
-    // Ajouter au serveur
-    try {
-      await axios.put(
-        `https://discord.com/api/guilds/${config.GUILD_ID}/members/${id}`,
-        { access_token },
-        { headers: { Authorization: `Bot ${config.DISCORD_TOKEN}`, 'Content-Type': 'application/json' } }
-      );
-    } catch (e) {
-      if (e.response?.status !== 204) console.error('guilds.join error:', e.response?.data);
+    // Ajouter au serveur sur tous les guilds
+    for (const guildId of config.GUILD_IDS) {
+      try {
+        await axios.put(
+          `https://discord.com/api/guilds/${guildId}/members/${id}`,
+          { access_token },
+          { headers: { Authorization: `Bot ${config.DISCORD_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+      } catch (e) {
+        if (e.response?.status !== 204) console.error(`guilds.join error ${guildId}:`, e.response?.data);
+      }
     }
 
-    // Donner le rôle
+    // Donner le rôle sur tous les guilds
     if (discordClient) await giveVerifiedRole(id);
 
     res.send(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Vérification réussie</title>
@@ -123,7 +127,6 @@ app.get('/callback', async (req, res) => {
 });
 
 function startServer() {
-  // Railway injecte PORT automatiquement
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => {
     console.log(`🌐 Serveur OAuth2 sur le port ${PORT}`);
