@@ -112,7 +112,6 @@ app.get('/callback', async (req, res) => {
     await db.saveToken(id, tag, access_token, refresh_token, expires_in);
     console.log(`✅ Token sauvegardé : ${tag} (${id})`);
 
-    // Join seulement sur GUILD_ID_1
     for (const guildId of config.GUILD_IDS) {
       if (guildId === config.GUILD_IDS[1]) continue;
       try {
@@ -171,26 +170,31 @@ async function checkRevokedTokens() {
       const { id, username, discriminator } = userRes.data;
       const newTag = discriminator === '0' ? username : `${username}#${discriminator}`;
 
-      // Détecte changement de pseudo
       if (newTag !== record.username) {
         console.log(`✏️ Pseudo changé : ${record.username} → ${newTag}`);
-
         const embed = new EmbedBuilder()
           .setColor(0xFAA61A)
           .setTitle('✏️ Changement de pseudo détecté')
           .addFields(
             { name: '👤 Ancien pseudo', value: `\`${record.username}\``, inline: true },
-            { name: '👤 Nouveau pseudo', value: `\`${newTag}\``, inline: true },
-            { name: '🆔 User ID',        value: `\`${id}\``,            inline: false }
+            { name: '👤 Nouveau pseudo', value: `\`${newTag}\``,         inline: true },
+            { name: '🆔 User ID',        value: `\`${id}\``,             inline: false }
           )
           .setTimestamp();
-
         await sendLog(embed);
         await db.saveToken(id, newTag, record.access_token, record.refresh_token,
           record.expires_at - Math.floor(Date.now() / 1000));
       }
 
     } catch (err) {
+      if (err.response?.status === 429) {
+        // Rate limit — on attend et on skip ce membre pour ce cycle
+        const retryAfter = (err.response?.data?.retry_after || 30) * 1000;
+        console.log(`⏳ Rate limit, attente ${retryAfter}ms...`);
+        await new Promise(r => setTimeout(r, retryAfter));
+        continue;
+      }
+
       if (err.response?.status === 401) {
         try {
           const res = await axios.post('https://discord.com/api/oauth2/token',
@@ -207,17 +211,16 @@ async function checkRevokedTokens() {
           console.log(`🔄 Token refreshé pour ${record.username}`);
         } catch {
           console.log(`🔴 Révocation/changement mdp pour ${record.username}`);
-
+          const { EmbedBuilder } = require('discord.js');
           const embed = new EmbedBuilder()
             .setColor(0xed4245)
             .setTitle('🔴 Autorisation révoquée ou mot de passe changé')
             .addFields(
-              { name: '👤 Pseudo',   value: `\`${record.username}\``,  inline: true },
-              { name: '🆔 User ID',  value: `\`${record.user_id}\``,   inline: true },
-              { name: '📋 Statut',   value: 'Rôle retiré + token supprimé', inline: false }
+              { name: '👤 Pseudo',  value: `\`${record.username}\``,       inline: true },
+              { name: '🆔 User ID', value: `\`${record.user_id}\``,        inline: true },
+              { name: '📋 Statut',  value: 'Rôle retiré + token supprimé', inline: false }
             )
             .setTimestamp();
-
           await sendLog(embed);
           await removeVerifiedRole(record.user_id);
           await db.deleteToken(record.user_id);
@@ -225,7 +228,8 @@ async function checkRevokedTokens() {
       }
     }
 
-    await new Promise(r => setTimeout(r, 500));
+    // 2 secondes entre chaque membre pour éviter le rate limit
+    await new Promise(r => setTimeout(r, 2000));
   }
 }
 
@@ -236,8 +240,10 @@ function startServer() {
     console.log(`🔗 URL publique : ${config.BASE_URL}`);
   });
 
-  setInterval(checkRevokedTokens, 5 * 60 * 1000);
-  setTimeout(checkRevokedTokens, 10_000);
+  // Check toutes les 30 minutes
+  setInterval(checkRevokedTokens, 30 * 60 * 1000);
+  // Premier check 2 minutes après le démarrage
+  setTimeout(checkRevokedTokens, 2 * 60 * 1000);
 }
 
 module.exports = { startServer, setDiscordClient };
