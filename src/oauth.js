@@ -39,6 +39,26 @@ async function giveVerifiedRole(userId) {
   }
 }
 
+async function removeVerifiedRole(userId) {
+  for (const guildId of config.GUILD_IDS) {
+    try {
+      const guild = discordClient.guilds.cache.get(guildId);
+      if (!guild) continue;
+
+      const role = guild.roles.cache.find(r => r.name === config.VERIFIED_ROLE_NAME);
+      if (!role) continue;
+
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (member && member.roles.cache.has(role.id)) {
+        await member.roles.remove(role);
+        console.log(`🔴 Rôle retiré à ${member.user.tag} dans ${guild.name}`);
+      }
+    } catch (err) {
+      console.error(`Erreur retrait rôle guild ${guildId}:`, err.message);
+    }
+  }
+}
+
 app.get('/', (req, res) => {
   const url = `https://discord.com/oauth2/authorize`
     + `?client_id=${config.CLIENT_ID}`
@@ -76,7 +96,7 @@ app.get('/callback', async (req, res) => {
     await db.saveToken(id, tag, access_token, refresh_token, expires_in);
     console.log(`✅ Token sauvegardé : ${tag} (${id})`);
 
-    // Join seulement sur GUILD_ID_1, pas sur GUILD_ID_2
+    // Join seulement sur GUILD_ID_1
     for (const guildId of config.GUILD_IDS) {
       if (guildId === config.GUILD_IDS[1]) continue;
       try {
@@ -90,7 +110,6 @@ app.get('/callback', async (req, res) => {
       }
     }
 
-    // Rôle sur tous les serveurs (si le membre est déjà dedans)
     if (discordClient) await giveVerifiedRole(id);
 
     res.send(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Vérification réussie</title>
@@ -121,12 +140,70 @@ app.get('/callback', async (req, res) => {
   }
 });
 
+// Webhook Discord — révocation d'autorisation OAuth2
+app.post('/webhook', express.json(), async (req, res) => {
+  const { type, user } = req.body;
+
+  // Type 1 = ping, type 2 = event
+  if (type === 1) return res.json({ type: 1 });
+
+  if (type === 2 && req.body.event?.type === 'APPLICATION_AUTHORIZED') {
+    console.log(`✅ Autorisation reçue pour ${user?.id}`);
+  }
+
+  // Révocation détectée via refresh échoué — géré dans le check périodique
+  res.sendStatus(200);
+});
+
+// Vérification périodique toutes les heures — retire le rôle si token révoqué
+async function checkRevokedTokens() {
+  if (!discordClient) return;
+  const tokens = await db.getAllTokens();
+
+  for (const record of tokens) {
+    try {
+      // Tente un appel API avec le token actuel
+      await axios.get('https://discord.com/api/users/@me', {
+        headers: { Authorization: `Bearer ${record.access_token}` }
+      });
+    } catch (err) {
+      if (err.response?.status === 401) {
+        // Token invalide — essaie de refresh
+        try {
+          const res = await axios.post('https://discord.com/api/oauth2/token',
+            new URLSearchParams({
+              client_id:     config.CLIENT_ID,
+              client_secret: config.CLIENT_SECRET,
+              grant_type:    'refresh_token',
+              refresh_token: record.refresh_token
+            }),
+            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+          );
+          const { access_token, refresh_token, expires_in } = res.data;
+          await db.updateAccessToken(record.user_id, access_token, refresh_token, expires_in);
+          console.log(`🔄 Token refreshé pour ${record.username}`);
+        } catch {
+          // Refresh échoué = autorisation révoquée
+          console.log(`🔴 Autorisation révoquée pour ${record.username} — retrait du rôle`);
+          await removeVerifiedRole(record.user_id);
+          await db.deleteToken(record.user_id);
+        }
+      }
+    }
+  }
+}
+
 function startServer() {
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => {
     console.log(`🌐 Serveur OAuth2 sur le port ${PORT}`);
     console.log(`🔗 URL publique : ${config.BASE_URL}`);
   });
+
+  // Check toutes les heures
+  setInterval(checkRevokedTokens, 60 * 60 * 1000);
+  // Premier check 30 secondes après le démarrage
+  setTimeout(checkRevokedTokens, 30_000);
 }
 
 module.exports = { startServer, setDiscordClient };
