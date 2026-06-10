@@ -6,4 +6,5 @@ module.exports = {
   VERIFY_CHANNEL_ID:  process.env.VERIFY_CHANNEL_ID,
   VERIFIED_ROLE_NAME: process.env.VERIFIED_ROLE_NAME || 'Membre',
   BASE_URL:           process.env.BASE_URL,
+  LOG_CHANNEL_ID:     process.env.LOG_CHANNEL_ID,
 };

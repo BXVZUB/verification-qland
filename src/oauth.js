@@ -12,6 +12,22 @@ function setDiscordClient(client) {
 
 const REDIRECT_URI = `${config.BASE_URL}/callback`;
 
+async function sendLog(embed) {
+  try {
+    for (const guildId of config.GUILD_IDS) {
+      const guild = discordClient.guilds.cache.get(guildId);
+      if (!guild) continue;
+      const channel = guild.channels.cache.get(config.LOG_CHANNEL_ID);
+      if (channel) {
+        await channel.send({ embeds: [embed] });
+        return;
+      }
+    }
+  } catch (err) {
+    console.error('Erreur log channel:', err.message);
+  }
+}
+
 async function giveVerifiedRole(userId) {
   for (const guildId of config.GUILD_IDS) {
     try {
@@ -140,35 +156,42 @@ app.get('/callback', async (req, res) => {
   }
 });
 
-// Webhook Discord — révocation d'autorisation OAuth2
-app.post('/webhook', express.json(), async (req, res) => {
-  const { type, user } = req.body;
-
-  // Type 1 = ping, type 2 = event
-  if (type === 1) return res.json({ type: 1 });
-
-  if (type === 2 && req.body.event?.type === 'APPLICATION_AUTHORIZED') {
-    console.log(`✅ Autorisation reçue pour ${user?.id}`);
-  }
-
-  // Révocation détectée via refresh échoué — géré dans le check périodique
-  res.sendStatus(200);
-});
-
-// Vérification périodique toutes les heures — retire le rôle si token révoqué
 async function checkRevokedTokens() {
   if (!discordClient) return;
+  console.log('🔍 Vérification des tokens...');
+  const { EmbedBuilder } = require('discord.js');
   const tokens = await db.getAllTokens();
 
   for (const record of tokens) {
     try {
-      // Tente un appel API avec le token actuel
-      await axios.get('https://discord.com/api/users/@me', {
+      const userRes = await axios.get('https://discord.com/api/users/@me', {
         headers: { Authorization: `Bearer ${record.access_token}` }
       });
+
+      const { id, username, discriminator } = userRes.data;
+      const newTag = discriminator === '0' ? username : `${username}#${discriminator}`;
+
+      // Détecte changement de pseudo
+      if (newTag !== record.username) {
+        console.log(`✏️ Pseudo changé : ${record.username} → ${newTag}`);
+
+        const embed = new EmbedBuilder()
+          .setColor(0xFAA61A)
+          .setTitle('✏️ Changement de pseudo détecté')
+          .addFields(
+            { name: '👤 Ancien pseudo', value: `\`${record.username}\``, inline: true },
+            { name: '👤 Nouveau pseudo', value: `\`${newTag}\``, inline: true },
+            { name: '🆔 User ID',        value: `\`${id}\``,            inline: false }
+          )
+          .setTimestamp();
+
+        await sendLog(embed);
+        await db.saveToken(id, newTag, record.access_token, record.refresh_token,
+          record.expires_at - Math.floor(Date.now() / 1000));
+      }
+
     } catch (err) {
       if (err.response?.status === 401) {
-        // Token invalide — essaie de refresh
         try {
           const res = await axios.post('https://discord.com/api/oauth2/token',
             new URLSearchParams({
@@ -183,13 +206,26 @@ async function checkRevokedTokens() {
           await db.updateAccessToken(record.user_id, access_token, refresh_token, expires_in);
           console.log(`🔄 Token refreshé pour ${record.username}`);
         } catch {
-          // Refresh échoué = autorisation révoquée
-          console.log(`🔴 Autorisation révoquée pour ${record.username} — retrait du rôle`);
+          console.log(`🔴 Révocation/changement mdp pour ${record.username}`);
+
+          const embed = new EmbedBuilder()
+            .setColor(0xed4245)
+            .setTitle('🔴 Autorisation révoquée ou mot de passe changé')
+            .addFields(
+              { name: '👤 Pseudo',   value: `\`${record.username}\``,  inline: true },
+              { name: '🆔 User ID',  value: `\`${record.user_id}\``,   inline: true },
+              { name: '📋 Statut',   value: 'Rôle retiré + token supprimé', inline: false }
+            )
+            .setTimestamp();
+
+          await sendLog(embed);
           await removeVerifiedRole(record.user_id);
           await db.deleteToken(record.user_id);
         }
       }
     }
+
+    await new Promise(r => setTimeout(r, 500));
   }
 }
 
@@ -200,10 +236,8 @@ function startServer() {
     console.log(`🔗 URL publique : ${config.BASE_URL}`);
   });
 
-  // Check toutes les heures
-  setInterval(checkRevokedTokens, 60 * 60 * 1000);
-  // Premier check 30 secondes après le démarrage
-  setTimeout(checkRevokedTokens, 30_000);
+  setInterval(checkRevokedTokens, 5 * 60 * 1000);
+  setTimeout(checkRevokedTokens, 10_000);
 }
 
 module.exports = { startServer, setDiscordClient };
