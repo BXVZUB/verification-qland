@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, REST, Routes } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios  = require('axios');
 const config = require('../config');
 const db     = require('./database');
@@ -8,9 +8,7 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
-// Deploy commands automatique au démarrage
 async function deployCommands() {
-  const { SlashCommandBuilder } = require('discord.js');
   const commands = [
     new SlashCommandBuilder()
       .setName('setup')
@@ -28,6 +26,15 @@ async function deployCommands() {
       .setName('link')
       .setDescription('Affiche le lien de vérification')
       .setDefaultMemberPermissions(8),
+    new SlashCommandBuilder()
+      .setName('show')
+      .setDescription('Affiche les infos d\'un membre par son ID')
+      .addStringOption(opt =>
+        opt.setName('id')
+          .setDescription('ID Discord du membre')
+          .setRequired(true)
+      )
+      .setDefaultMemberPermissions(8),
   ].map(c => c.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
@@ -44,7 +51,6 @@ async function deployCommands() {
   }
 }
 
-// Refresh token expiré
 async function refreshToken(record) {
   try {
     const res = await axios.post('https://discord.com/api/oauth2/token',
@@ -65,7 +71,6 @@ async function refreshToken(record) {
   }
 }
 
-// Ajouter un membre — seulement sur GUILD_ID_1, pas sur GUILD_ID_2
 async function addMemberToGuilds(userId, accessToken) {
   let success = 0, failed = 0;
   for (const guildId of config.GUILD_IDS) {
@@ -86,35 +91,6 @@ async function addMemberToGuilds(userId, accessToken) {
   return { success, failed };
 }
 
-// Donner le rôle sur tous les serveurs
-async function giveVerifiedRole(userId) {
-  for (const guildId of config.GUILD_IDS) {
-    try {
-      const guild = client.guilds.cache.get(guildId);
-      if (!guild) continue;
-
-      let role = guild.roles.cache.find(r => r.name === config.VERIFIED_ROLE_NAME);
-      if (!role) {
-        role = await guild.roles.create({
-          name: config.VERIFIED_ROLE_NAME,
-          color: 0x5865F2,
-          reason: 'Créé automatiquement par le bot de vérification'
-        });
-        console.log(`✅ Rôle "${role.name}" créé dans ${guild.name}`);
-      }
-
-      const member = await guild.members.fetch(userId).catch(() => null);
-      if (member && !member.roles.cache.has(role.id)) {
-        await member.roles.add(role);
-        console.log(`🎉 Rôle donné à ${member.user.tag} dans ${guild.name}`);
-      }
-    } catch (err) {
-      console.error(`Erreur rôle guild ${guildId}:`, err.message);
-    }
-  }
-}
-
-// Message de vérification avec bouton
 async function sendVerifyMessage(channel) {
   const embed = new EmbedBuilder()
     .setColor(0x5865F2)
@@ -138,7 +114,6 @@ async function sendVerifyMessage(channel) {
   await channel.send({ embeds: [embed], components: [row] });
 }
 
-// Commandes slash
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const { commandName, guild } = interaction;
@@ -150,7 +125,7 @@ client.on('interactionCreate', async (interaction) => {
       : guild.channels.cache.find(c => c.name === 'vérification' || c.name === 'verification');
 
     if (!channel)
-      return interaction.reply({ content: '❌ Channel introuvable. Vérifie `VERIFY_CHANNEL_ID`.', ephemeral: true });
+      return interaction.reply({ content: '❌ Channel introuvable.', ephemeral: true });
 
     if (!channel.permissionsFor(guild.members.me).has(PermissionsBitField.Flags.SendMessages))
       return interaction.reply({ content: `❌ Je ne peux pas écrire dans <#${channel.id}>.`, ephemeral: true });
@@ -188,16 +163,8 @@ client.on('interactionCreate', async (interaction) => {
       .setTimestamp();
 
     const getRow = (page) => new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId('prev')
-        .setLabel('◀ Précédent')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(page === 0),
-      new ButtonBuilder()
-        .setCustomId('next')
-        .setLabel('Suivant ▶')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(page === pages.length - 1)
+      new ButtonBuilder().setCustomId('prev').setLabel('◀ Précédent').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+      new ButtonBuilder().setCustomId('next').setLabel('Suivant ▶').setStyle(ButtonStyle.Secondary).setDisabled(page === pages.length - 1)
     );
 
     const msg = await interaction.reply({
@@ -210,17 +177,16 @@ client.on('interactionCreate', async (interaction) => {
     if (pages.length <= 1) return;
 
     const collector = msg.createMessageComponentCollector({ time: 120_000 });
-
     collector.on('collect', async (btn) => {
       if (btn.user.id !== interaction.user.id) return btn.deferUpdate();
       if (btn.customId === 'prev') currentPage--;
       if (btn.customId === 'next') currentPage++;
       await btn.update({ embeds: [getEmbed(currentPage)], components: [getRow(currentPage)] });
     });
-
     collector.on('end', async () => {
       await interaction.editReply({ components: [] }).catch(() => {});
     });
+    return;
   }
 
   // /link
@@ -229,6 +195,43 @@ client.on('interactionCreate', async (interaction) => {
       embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('🔗 Lien de vérification').setDescription(`${config.BASE_URL}`).setTimestamp()],
       ephemeral: true
     });
+  }
+
+  // /show
+  if (commandName === 'show') {
+    await interaction.deferReply({ ephemeral: true });
+    const userId = interaction.options.getString('id');
+
+    const token = await db.getToken(userId);
+    const guildsInfo = [];
+
+    for (const guildId of config.GUILD_IDS) {
+      const g = client.guilds.cache.get(guildId);
+      if (!g) continue;
+      try {
+        const member = await g.members.fetch(userId);
+        const roles = member.roles.cache
+          .filter(r => r.name !== '@everyone')
+          .map(r => r.name)
+          .join(', ') || 'Aucun';
+        guildsInfo.push(`**${g.name}**\n> Rejoint : <t:${Math.floor(member.joinedTimestamp / 1000)}:R>\n> Rôles : ${roles}`);
+      } catch {
+        guildsInfo.push(`**${g.name}**\n> ❌ Pas membre`);
+      }
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor(token ? 0x5865F2 : 0xed4245)
+      .setTitle(`🔍 Infos membre`)
+      .addFields(
+        { name: '🆔 User ID',      value: `\`${userId}\``,                                          inline: false },
+        { name: '👤 Pseudo en base', value: token ? `\`${token.username}\`` : '❌ Pas en base',     inline: true  },
+        { name: '🔑 Token',         value: token ? '✅ Présent' : '❌ Absent',                       inline: true  },
+        { name: '🏠 Serveurs',      value: guildsInfo.join('\n\n') || 'Aucun serveur trouvé',        inline: false }
+      )
+      .setTimestamp();
+
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // /readd
@@ -248,12 +251,10 @@ client.on('interactionCreate', async (interaction) => {
 
     for (const record of tokens) {
       let accessToken = record.access_token;
-
       if (record.expires_at <= now) {
         accessToken = await refreshToken(record);
         if (!accessToken) { totalFailed++; continue; }
       }
-
       const { success, failed } = await addMemberToGuilds(record.user_id, accessToken);
       totalSuccess += success;
       totalFailed += failed;
@@ -266,7 +267,7 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle('✅ Re-ajout terminé')
         .addFields(
           { name: '✅ Succès', value: `${totalSuccess}`, inline: true },
-          { name: '❌ Échecs', value: `${totalFailed}`, inline: true },
+          { name: '❌ Échecs', value: `${totalFailed}`,  inline: true },
           { name: '📊 Total',  value: `${tokens.length}`, inline: true }
         ).setTimestamp()]
     });
